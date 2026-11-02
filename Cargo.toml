@@ -6,10 +6,11 @@ edition = "2024"
 [dependencies]
 anyhow = "1.0.104"
 base64 = "0.23.1"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
 dirs = "7.0.0"
-eframe = "0.37.0"
+eframe = { version = "0.37.0", features = ["persistence"] }
 egui = "0.37.0"
-egui_extras = "0.37.0"
+egui_extras = { version = "0.37.0", features = ["serde"] }
 keyring = { version = "3", features = ["windows-native", "apple-native", "sync-secret-service", "crypto-rust"] }
 rfd = "0.17.2"
 serde = { version = "1.0.229", features = ["derive"] }

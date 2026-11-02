@@ -311,6 +311,8 @@ fn job(server: &FakeServer, token: &str, owner: &str, name: &str) -> RepoJob {
             fork: false,
             archived: false,
             description: "demo project".to_owned(),
+            created_at: None,
+            modified_at: None,
         },
         source: server.access(token),
     }

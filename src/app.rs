@@ -1,5 +1,6 @@
 //! The graphical interface.
 
+use std::cmp::Ordering as CmpOrdering;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -8,14 +9,15 @@ use std::sync::mpsc::{Receiver, Sender, channel};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
+use chrono::{DateTime, Local, Utc};
 use eframe::egui;
 use egui::{Color32, RichText};
 use egui_extras::{Column, TableBuilder};
 
 use crate::backup::{self, Event, Plan, RemoteTarget, RepoJob, RepoStatus, ServerAccess};
 use crate::config::{
-    Account, Config, Destination, DestinationKind, ProviderKind, delete_token, is_safe_segment,
-    load_token, new_id, normalize_base_url, store_token,
+    Account, Config, Destination, DestinationKind, ProviderKind, SortColumn, SortOrder, delete_token,
+    is_safe_segment, load_token, new_id, normalize_base_url, store_token,
 };
 use crate::i18n::{set_language, t, tf};
 use crate::provider::{Client, Listing, Repo};
@@ -88,6 +90,7 @@ enum Action {
     EditDestination(String),
     AskDeleteDestination(String),
     SaveConfig,
+    SortBy(SortColumn),
     Start,
     Cancel,
 }
@@ -236,7 +239,7 @@ impl App {
                         status: RepoStatus::Idle,
                     });
                 }
-                self.repos.sort_by_key(|row| row.repo.full_name().to_lowercase());
+                sort_rows(&mut self.repos, self.config.sort);
                 for warning in listing.warnings {
                     self.push_log(true, warning);
                 }
@@ -512,6 +515,11 @@ impl App {
                 Action::EditDestination(id) => self.open_destination_form(Some(id)),
                 Action::AskDeleteDestination(id) => self.dialog = Dialog::ConfirmDeleteDestination(id),
                 Action::SaveConfig => self.save_config(),
+                Action::SortBy(column) => {
+                    self.config.sort = next_sort(self.config.sort, column);
+                    sort_rows(&mut self.repos, self.config.sort);
+                    self.save_config();
+                }
                 Action::Start => self.start_backup(),
                 Action::Cancel => {
                     if let Some(cancel) = &self.run_cancel {
@@ -785,79 +793,91 @@ impl App {
         let selected = &mut self.config.selected;
         let repos = &self.repos;
         let accounts = &self.config.accounts;
+        let sort = self.config.sort;
         let row_height = ui.text_style_height(&egui::TextStyle::Body) + 6.0;
-        TableBuilder::new(ui)
-            .striped(true)
-            .auto_shrink([false, false])
-            .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
-            .column(Column::exact(26.0))
-            .column(Column::remainder().at_least(180.0).clip(true))
-            .column(Column::auto().at_least(120.0))
-            .column(Column::auto().at_least(120.0).clip(true))
-            .column(Column::auto().at_least(120.0))
-            .header(row_height, |mut header| {
-                header.col(|ui| {
-                    let total = visible.len();
-                    let mut all = total > 0 && visible_selected == total;
-                    let partly = visible_selected > 0 && visible_selected < total;
-                    let checkbox = egui::Checkbox::without_text(&mut all).indeterminate(partly);
-                    if ui.add(checkbox).on_hover_text(t("Select or clear all shown")).changed() {
-                        for &index in &visible {
-                            if all {
-                                selected.insert(repos[index].key.clone());
-                            } else {
-                                selected.remove(&repos[index].key);
-                            }
-                        }
-                        actions.push(Action::SaveConfig);
-                    }
-                });
-                header.col(|ui| {
-                    ui.strong(t("Repository"));
-                });
-                header.col(|ui| {
-                    ui.strong(t("Type"));
-                });
-                header.col(|ui| {
-                    ui.strong(t("Account"));
-                });
-                header.col(|ui| {
-                    ui.strong(t("Status"));
-                });
-            })
-            .body(|body| {
-                body.rows(row_height, visible.len(), |mut table_row| {
-                    let row = &repos[visible[table_row.index()]];
-                    table_row.col(|ui| {
-                        let mut checked = selected.contains(&row.key);
-                        if ui.checkbox(&mut checked, "").changed() {
-                            if checked {
-                                selected.insert(row.key.clone());
-                            } else {
-                                selected.remove(&row.key);
+        egui::ScrollArea::horizontal().auto_shrink([false, false]).show(ui, |ui| {
+            TableBuilder::new(ui)
+                .striped(true)
+                .auto_shrink([false, false])
+                .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
+                .resizable(true)
+                .column(Column::exact(26.0).resizable(false))
+                .column(Column::initial(260.0).at_least(80.0).clip(true))
+                .column(Column::initial(125.0).at_least(60.0).clip(true))
+                .column(Column::initial(125.0).at_least(60.0).clip(true))
+                .column(Column::initial(100.0).at_least(60.0).clip(true))
+                .column(Column::initial(110.0).at_least(60.0).clip(true))
+                .column(Column::remainder().at_least(90.0).clip(true))
+                .header(row_height, |mut header| {
+                    header.col(|ui| {
+                        let total = visible.len();
+                        let mut all = total > 0 && visible_selected == total;
+                        let partly = visible_selected > 0 && visible_selected < total;
+                        let checkbox = egui::Checkbox::without_text(&mut all).indeterminate(partly);
+                        if ui.add(checkbox).on_hover_text(t("Select or clear all shown")).changed() {
+                            for &index in &visible {
+                                if all {
+                                    selected.insert(repos[index].key.clone());
+                                } else {
+                                    selected.remove(&repos[index].key);
+                                }
                             }
                             actions.push(Action::SaveConfig);
                         }
                     });
-                    table_row.col(|ui| {
-                        let response = ui.add(egui::Label::new(row.repo.full_name()).truncate());
-                        if !row.repo.description.is_empty() {
-                            response.on_hover_text(&row.repo.description);
-                        }
+                    header.col(|ui| sort_header(ui, t("Repository"), SortColumn::Name, sort, actions));
+                    header.col(|ui| sort_header(ui, t("Created"), SortColumn::Created, sort, actions));
+                    header.col(|ui| sort_header(ui, t("Modified"), SortColumn::Modified, sort, actions));
+                    header.col(|ui| {
+                        ui.strong(t("Type"));
                     });
-                    table_row.col(|ui| {
-                        ui.label(repo_type_text(&row.repo));
+                    header.col(|ui| {
+                        ui.strong(t("Account"));
                     });
-                    table_row.col(|ui| {
-                        let name = accounts
-                            .iter()
-                            .find(|account| account.id == row.account_id)
-                            .map_or("", |account| account.name.as_str());
-                        ui.add(egui::Label::new(name).truncate());
+                    header.col(|ui| {
+                        ui.strong(t("Status"));
                     });
-                    table_row.col(|ui| status_cell(ui, &row.status));
+                })
+                .body(|body| {
+                    body.rows(row_height, visible.len(), |mut table_row| {
+                        let row = &repos[visible[table_row.index()]];
+                        table_row.col(|ui| {
+                            let mut checked = selected.contains(&row.key);
+                            if ui.checkbox(&mut checked, "").changed() {
+                                if checked {
+                                    selected.insert(row.key.clone());
+                                } else {
+                                    selected.remove(&row.key);
+                                }
+                                actions.push(Action::SaveConfig);
+                            }
+                        });
+                        table_row.col(|ui| {
+                            let response = ui.add(egui::Label::new(row.repo.full_name()).truncate());
+                            if !row.repo.description.is_empty() {
+                                response.on_hover_text(&row.repo.description);
+                            }
+                        });
+                        table_row.col(|ui| {
+                            ui.label(time_text(row.repo.created_at));
+                        });
+                        table_row.col(|ui| {
+                            ui.label(time_text(row.repo.modified_at));
+                        });
+                        table_row.col(|ui| {
+                            ui.label(repo_type_text(&row.repo));
+                        });
+                        table_row.col(|ui| {
+                            let name = accounts
+                                .iter()
+                                .find(|account| account.id == row.account_id)
+                                .map_or("", |account| account.name.as_str());
+                            ui.add(egui::Label::new(name).truncate());
+                        });
+                        table_row.col(|ui| status_cell(ui, &row.status));
+                    });
                 });
-            });
+        });
     }
 
     fn dialogs(&mut self, ctx: &egui::Context) {
@@ -1136,6 +1156,63 @@ fn repo_type_text(repo: &Repo) -> String {
     parts.join(", ")
 }
 
+fn time_text(time: Option<DateTime<Utc>>) -> String {
+    time.map_or(String::new(), |time| {
+        time.with_timezone(&Local).format("%Y-%m-%d %H:%M").to_string()
+    })
+}
+
+/// A column header that sorts by that column when clicked.
+fn sort_header(
+    ui: &mut egui::Ui,
+    label: &str,
+    column: SortColumn,
+    sort: SortOrder,
+    actions: &mut Vec<Action>,
+) {
+    let arrow = match (sort.column == column, sort.descending) {
+        (false, _) => "",
+        (true, false) => " \u{2b06}",
+        (true, true) => " \u{2b07}",
+    };
+    let text = RichText::new(format!("{label}{arrow}")).strong();
+    let button = ui.add(egui::Button::new(text).frame(false));
+    if button.on_hover_text(t("Click to sort")).clicked() {
+        actions.push(Action::SortBy(column));
+    }
+}
+
+/// Clicking the current column reverses it. A new column starts with what is
+/// usually wanted: names from A, times from the newest.
+fn next_sort(current: SortOrder, column: SortColumn) -> SortOrder {
+    let descending = if current.column == column {
+        !current.descending
+    } else {
+        column != SortColumn::Name
+    };
+    SortOrder { column, descending }
+}
+
+fn sort_rows(rows: &mut [RepoRow], sort: SortOrder) {
+    let by_name = |a: &RepoRow, b: &RepoRow| {
+        a.repo.full_name().to_lowercase().cmp(&b.repo.full_name().to_lowercase())
+    };
+    // Rows without a time stay last in both directions.
+    let by_time = |a: Option<DateTime<Utc>>, b: Option<DateTime<Utc>>| match (a, b) {
+        (Some(a), Some(b)) if sort.descending => b.cmp(&a),
+        (Some(a), Some(b)) => a.cmp(&b),
+        (Some(_), None) => CmpOrdering::Less,
+        (None, Some(_)) => CmpOrdering::Greater,
+        (None, None) => CmpOrdering::Equal,
+    };
+    rows.sort_by(|a, b| match sort.column {
+        SortColumn::Name if sort.descending => by_name(b, a),
+        SortColumn::Name => by_name(a, b),
+        SortColumn::Created => by_time(a.repo.created_at, b.repo.created_at).then_with(|| by_name(a, b)),
+        SortColumn::Modified => by_time(a.repo.modified_at, b.repo.modified_at).then_with(|| by_name(a, b)),
+    });
+}
+
 fn status_cell(ui: &mut egui::Ui, status: &RepoStatus) {
     match status {
         RepoStatus::Idle => {}
@@ -1220,5 +1297,60 @@ impl eframe::App for App {
                 std::thread::sleep(Duration::from_millis(50));
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::TimeZone;
+
+    fn row(name: &str, day: Option<u32>) -> RepoRow {
+        let time = day.map(|day| Utc.with_ymd_and_hms(2024, 1, day, 0, 0, 0).unwrap());
+        RepoRow {
+            key: name.to_owned(),
+            account_id: "a".to_owned(),
+            repo: Repo {
+                owner: "me".to_owned(),
+                name: name.to_owned(),
+                private: false,
+                fork: false,
+                archived: false,
+                description: String::new(),
+                created_at: time,
+                modified_at: time,
+            },
+            status: RepoStatus::Idle,
+        }
+    }
+
+    fn sorted(column: SortColumn, descending: bool) -> Vec<String> {
+        let mut rows = [row("b", Some(1)), row("none", None), row("C", Some(3)), row("a", Some(3))];
+        sort_rows(&mut rows, SortOrder { column, descending });
+        rows.iter().map(|row| row.repo.name.clone()).collect()
+    }
+
+    #[test]
+    fn sorts_by_name_ignoring_case() {
+        assert_eq!(sorted(SortColumn::Name, false), ["a", "b", "C", "none"]);
+        assert_eq!(sorted(SortColumn::Name, true), ["none", "C", "b", "a"]);
+    }
+
+    #[test]
+    fn sorts_by_time_with_ties_by_name_and_missing_times_last() {
+        for column in [SortColumn::Created, SortColumn::Modified] {
+            assert_eq!(sorted(column, true), ["a", "C", "b", "none"]);
+            assert_eq!(sorted(column, false), ["b", "a", "C", "none"]);
+        }
+    }
+
+    #[test]
+    fn clicking_a_header_picks_a_default_then_reverses() {
+        let name = SortOrder::default();
+        let newest = next_sort(name, SortColumn::Modified);
+        assert_eq!(newest, SortOrder { column: SortColumn::Modified, descending: true });
+        let oldest = next_sort(newest, SortColumn::Modified);
+        assert_eq!(oldest, SortOrder { column: SortColumn::Modified, descending: false });
+        assert_eq!(next_sort(oldest, SortColumn::Name), name);
     }
 }

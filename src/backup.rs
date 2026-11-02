@@ -295,6 +295,8 @@ mod tests {
             fork: false,
             archived: false,
             description: String::new(),
+            created_at: None,
+            modified_at: None,
         }
     }
 

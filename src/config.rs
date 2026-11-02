@@ -59,6 +59,21 @@ pub struct Destination {
     pub kind: DestinationKind,
 }
 
+/// The repository list column that decides the row order.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SortColumn {
+    #[default]
+    Name,
+    Created,
+    Modified,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SortOrder {
+    pub column: SortColumn,
+    pub descending: bool,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
@@ -70,6 +85,7 @@ pub struct Config {
     /// Also delete refs that no longer exist on the source. Off by default,
     /// so a branch deleted upstream is still recoverable from the backup.
     pub prune: bool,
+    pub sort: SortOrder,
 }
 
 impl Default for Config {
@@ -81,6 +97,7 @@ impl Default for Config {
             selected: BTreeSet::new(),
             workers: 4,
             prune: false,
+            sort: SortOrder::default(),
         }
     }
 }

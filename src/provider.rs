@@ -4,6 +4,7 @@ use std::collections::BTreeSet;
 use std::time::Duration;
 
 use anyhow::{Result, anyhow, bail};
+use chrono::{DateTime, Utc};
 use serde::Deserialize;
 use serde_json::json;
 use ureq::Agent;
@@ -27,6 +28,10 @@ pub struct Repo {
     pub fork: bool,
     pub archived: bool,
     pub description: String,
+    pub created_at: Option<DateTime<Utc>>,
+    /// When the content last changed: the last push where the server reports
+    /// it, otherwise the last update.
+    pub modified_at: Option<DateTime<Utc>>,
 }
 
 impl Repo {
@@ -55,6 +60,21 @@ struct ApiRepo {
     archived: bool,
     #[serde(default)]
     description: Option<String>,
+    #[serde(default)]
+    created_at: Option<String>,
+    #[serde(default)]
+    updated_at: Option<String>,
+    /// Only GitHub reports this. Its `updated_at` also moves on changes that
+    /// do not touch the content, such as a new star.
+    #[serde(default)]
+    pushed_at: Option<String>,
+}
+
+/// Timestamps are parsed rather than compared as text, because Gitea reports
+/// them with the server's UTC offset. A bad value only costs its sort position.
+fn parse_time(text: Option<&str>) -> Option<DateTime<Utc>> {
+    let time = DateTime::parse_from_rfc3339(text?).ok()?;
+    Some(time.with_timezone(&Utc))
 }
 
 #[derive(Deserialize)]
@@ -271,6 +291,8 @@ impl Client {
                     fork: api.fork,
                     archived: api.archived,
                     description: api.description.clone().unwrap_or_default(),
+                    created_at: parse_time(api.created_at.as_deref()),
+                    modified_at: parse_time(api.pushed_at.as_deref().or(api.updated_at.as_deref())),
                 });
             }
         }
@@ -411,6 +433,29 @@ mod tests {
             .unwrap_or("1")
             .parse()
             .unwrap()
+    }
+
+    #[test]
+    fn listing_reads_times_and_prefers_the_last_push() {
+        let (base, _log) = serve(|_, path| {
+            let body = match path.split('?').next().unwrap() {
+                "/api/v3/user" => r#"{"login":"me"}"#,
+                "/api/v3/user/repos" if query_page(path) == 1 => {
+                    r#"[{"full_name":"me/a","created_at":"2024-01-02T00:30:00+08:00",
+                         "updated_at":"2024-03-01T00:00:00Z","pushed_at":"2024-02-01T00:00:00Z"},
+                        {"full_name":"me/b","updated_at":"2024-03-01T00:00:00Z","pushed_at":null},
+                        {"full_name":"me/c","created_at":"not a time"}]"#
+                }
+                _ => "[]",
+            };
+            (200, body.to_owned())
+        });
+        let listing = Client::new(ProviderKind::GitHub, &base, "t").list_repos().unwrap();
+        let [a, b, c] = &listing.repos[..] else { panic!("expected three repositories") };
+        assert_eq!(a.created_at, parse_time(Some("2024-01-01T16:30:00Z")));
+        assert_eq!(a.modified_at, parse_time(Some("2024-02-01T00:00:00Z")));
+        assert_eq!(b.modified_at, parse_time(Some("2024-03-01T00:00:00Z")));
+        assert_eq!((c.created_at, c.modified_at), (None, None));
     }
 
     #[test]
