@@ -45,6 +45,10 @@ struct ApiRepo {
     full_name: String,
     #[serde(default)]
     private: bool,
+    /// Gitea's "internal" repositories report `private: false` but are only
+    /// visible to signed-in users.
+    #[serde(default)]
+    internal: bool,
     #[serde(default)]
     fork: bool,
     #[serde(default)]
@@ -151,6 +155,24 @@ impl Client {
                 .header("Accept", accept)
                 .call(),
         };
+        self.read_response(response)
+    }
+
+    fn patch(&self, path: &str, body: serde_json::Value) -> Result<(u16, String)> {
+        let response = self
+            .agent
+            .patch(&self.api_url(path))
+            .header("Authorization", &self.authorization())
+            .header("Accept", "application/vnd.github+json, application/json")
+            .header("Content-Type", "application/json")
+            .send(body.to_string());
+        self.read_response(response)
+    }
+
+    fn read_response(
+        &self,
+        response: Result<ureq::http::Response<ureq::Body>, ureq::Error>,
+    ) -> Result<(u16, String)> {
         let mut response = response.map_err(|error| {
             anyhow!(tf("Cannot connect to {}: {}", &[&self.base_url, &error.to_string()]))
         })?;
@@ -245,7 +267,7 @@ impl Client {
                 repos.push(Repo {
                     owner: owner.to_owned(),
                     name: name.to_owned(),
-                    private: api.private,
+                    private: api.private || api.internal,
                     fork: api.fork,
                     archived: api.archived,
                     description: api.description.clone().unwrap_or_default(),
@@ -256,7 +278,8 @@ impl Client {
         Ok(Listing { login, repos, warnings })
     }
 
-    /// Makes sure `owner/name` exists as a private backup of `source_url`.
+    /// Makes sure `owner/name` exists as a backup of `source_url`, with the
+    /// same visibility as the source.
     /// An existing repository is only used if its description says it is the
     /// backup of that same source; otherwise pushing could overwrite an
     /// unrelated project or mix two sources whose names collide.
@@ -266,6 +289,7 @@ impl Client {
         owner: &str,
         name: &str,
         source_url: &str,
+        private: bool,
     ) -> Result<()> {
         let marker = format!("{BACKUP_MARKER}{source_url}");
         let (status, text) = self.request(&format!("/repos/{owner}/{name}"), None)?;
@@ -278,11 +302,14 @@ impl Client {
                         &[owner, name, &marker]
                     ));
                 }
-                if !existing.private {
-                    bail!(tf(
-                        "{}/{} is public, refusing to push a backup to it",
-                        &[owner, name]
-                    ));
+                if existing.private != private {
+                    let changed = self.set_private(owner, name, private);
+                    // Only a backup more exposed than its source must stop the
+                    // push. The other way round is harmless, and some servers
+                    // refuse it for good, for example with Gitea's FORCE_PRIVATE.
+                    if private {
+                        changed?;
+                    }
                 }
                 Ok(())
             }
@@ -295,7 +322,7 @@ impl Client {
                 let body = json!({
                     "name": name,
                     "description": marker,
-                    "private": true,
+                    "private": private,
                     "auto_init": false,
                 });
                 let (status, text) = self.request(&path, Some(body))?;
@@ -307,6 +334,15 @@ impl Client {
             }
             _ => bail!(self.status_error(status, &text)),
         }
+    }
+
+    fn set_private(&self, owner: &str, name: &str, private: bool) -> Result<()> {
+        let path = format!("/repos/{owner}/{name}");
+        let (status, text) = self.patch(&path, json!({ "private": private }))?;
+        if status != 200 {
+            bail!(self.status_error(status, &text));
+        }
+        Ok(())
     }
 }
 
@@ -446,35 +482,88 @@ mod tests {
     }
 
     #[test]
-    fn missing_backup_repo_is_created_private() {
+    fn gitea_internal_repo_counts_as_private() {
+        let (base, _log) = serve(|_, path| {
+            let body = match path.split('?').next().unwrap() {
+                "/api/v1/user" => r#"{"login":"me"}"#,
+                "/api/v1/user/repos" if query_page(path) == 1 => {
+                    r#"[{"full_name":"me/a","private":false,"internal":true}]"#
+                }
+                _ => "[]",
+            };
+            (200, body.to_owned())
+        });
+        let listing = Client::new(ProviderKind::Gitea, &base, "t").list_repos().unwrap();
+        assert!(listing.repos[0].private);
+    }
+
+    #[test]
+    fn missing_backup_repo_is_created_with_the_source_visibility() {
         let (base, log) = serve(|method, _| match method {
             "POST" => (201, "{}".to_owned()),
             _ => (404, "{}".to_owned()),
         });
         let client = Client::new(ProviderKind::Gitea, &base, "t");
-        client.ensure_backup_repo("me", "me", "a-b", "https://src/a/b.git").unwrap();
-        client.ensure_backup_repo("me", "team", "a-b", "https://src/a/b.git").unwrap();
+        client.ensure_backup_repo("me", "me", "a-b", "https://src/a/b.git", true).unwrap();
+        client.ensure_backup_repo("me", "team", "a-b", "https://src/a/b.git", false).unwrap();
         let log = log.lock().unwrap();
         assert!(log[1].starts_with("POST /api/v1/user/repos"));
         assert!(log[1].contains(r#""private":true"#));
         assert!(log[3].starts_with("POST /api/v1/orgs/team/repos"));
+        assert!(log[3].contains(r#""private":false"#));
     }
 
     #[test]
-    fn existing_repo_needs_the_matching_private_marker() {
-        let source = "https://src/a/b.git";
-        let matching =
-            format!(r#"{{"full_name":"m/n","private":true,"description":"Backup of {source}"}}"#);
-        let public =
-            format!(r#"{{"full_name":"m/n","private":false,"description":"Backup of {source}"}}"#);
-        let foreign = r#"{"full_name":"m/n","private":true,"description":"my project"}"#.to_owned();
+    fn existing_repo_needs_the_matching_marker() {
+        let foreign = r#"{"full_name":"m/n","private":false,"description":"my project"}"#;
+        let (base, log) = serve(move |_, _| (200, foreign.to_owned()));
+        let client = Client::new(ProviderKind::Gitea, &base, "t");
+        assert!(client.ensure_backup_repo("m", "m", "n", "https://src/a/b.git", true).is_err());
+        assert_eq!(log.lock().unwrap().len(), 1, "must not change anything");
+    }
 
-        for (body, ok) in [(matching, true), (public, false), (foreign, false)] {
-            let (base, log) = serve(move |_, _| (200, body.clone()));
+    /// Serves an existing backup of `https://src/a/b.git`, answering any
+    /// visibility change with `patch_status`.
+    fn serve_existing_backup(private: bool, patch_status: u16) -> (String, Log) {
+        serve(move |method, _| match method {
+            "PATCH" => (patch_status, "{}".to_owned()),
+            _ => (
+                200,
+                format!(
+                    r#"{{"full_name":"m/n","private":{private},"description":"Backup of https://src/a/b.git"}}"#
+                ),
+            ),
+        })
+    }
+
+    #[test]
+    fn existing_backup_follows_the_source_visibility() {
+        for (source_private, backup_private) in
+            [(true, true), (false, false), (true, false), (false, true)]
+        {
+            let (base, log) = serve_existing_backup(backup_private, 200);
             let client = Client::new(ProviderKind::Gitea, &base, "t");
-            let result = client.ensure_backup_repo("m", "m", "n", source);
-            assert_eq!(result.is_ok(), ok);
-            assert_eq!(log.lock().unwrap().len(), 1, "must not attempt to create");
+            client
+                .ensure_backup_repo("m", "m", "n", "https://src/a/b.git", source_private)
+                .unwrap();
+            let log = log.lock().unwrap();
+            if source_private == backup_private {
+                assert_eq!(log.len(), 1, "nothing to change");
+            } else {
+                assert!(log[1].starts_with("PATCH /api/v1/repos/m/n"));
+                assert!(log[1].contains(&format!(r#""private":{source_private}"#)));
+            }
         }
+    }
+
+    #[test]
+    fn only_a_backup_left_too_exposed_stops_the_push() {
+        let (base, _log) = serve_existing_backup(false, 403);
+        let client = Client::new(ProviderKind::Gitea, &base, "t");
+        assert!(client.ensure_backup_repo("m", "m", "n", "https://src/a/b.git", true).is_err());
+
+        let (base, _log) = serve_existing_backup(true, 422);
+        let client = Client::new(ProviderKind::Gitea, &base, "t");
+        assert!(client.ensure_backup_repo("m", "m", "n", "https://src/a/b.git", false).is_ok());
     }
 }

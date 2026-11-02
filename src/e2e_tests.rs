@@ -220,6 +220,14 @@ fn handle_api(
             );
             (201, json!({}))
         }
+        ("PATCH", route) if route.starts_with("/repos/") => {
+            let full = route.trim_start_matches("/repos/");
+            let request: serde_json::Value = serde_json::from_slice(body).unwrap();
+            let mut repos = state.repos.lock().unwrap();
+            let meta = repos.get_mut(full).unwrap();
+            meta.private = request["private"].as_bool().unwrap();
+            (200, repo_json(full, meta))
+        }
         ("GET", route) if route.starts_with("/repos/") => {
             let full = route.trim_start_matches("/repos/");
             match state.repos.lock().unwrap().get(full) {
@@ -373,7 +381,7 @@ fn backs_up_to_local_and_remote_then_updates_both() {
     assert!(!pushed_refs.contains("refs/pull"), "pull refs are read-only on servers");
 
     let meta = dest.state.repos.lock().unwrap()["bob/alice-proj"].clone();
-    assert!(meta.private, "a backup must never be created public");
+    assert!(meta.private, "a private source must get a private backup");
     assert_eq!(meta.description, format!("Backup of {}/alice/proj.git", source.base_url));
 
     // Nothing written to disk may contain the credentials.
@@ -403,6 +411,31 @@ fn remote_only_destination_needs_no_local_folder() {
     });
     assert_eq!(statuses["alice/proj"], RepoStatus::Done, "{statuses:?}");
     assert!(refs(&dest.git_dir("bob/alice-proj")).contains("refs/heads/main"));
+}
+
+#[test]
+fn backup_visibility_follows_the_source() {
+    let root = tempfile::tempdir().unwrap();
+    let source = FakeServer::start(root.path(), "alice", "source-secret", 0);
+    let dest = FakeServer::start(root.path(), "bob", "dest-secret", 0);
+    source.add_source_repo("alice", "proj");
+    let plan = |private: bool| {
+        let mut job = job(&source, "source-secret", "alice", "proj");
+        job.repo.private = private;
+        Plan {
+            jobs: vec![job],
+            local: vec![],
+            remote: vec![remote(&dest, "dest-secret")],
+            prune: false,
+            workers: 1,
+        }
+    };
+    // A public source, then the same source turned private, then public again.
+    for private in [false, true, false] {
+        let (statuses, _) = run(plan(private));
+        assert_eq!(statuses["alice/proj"], RepoStatus::Done, "{statuses:?}");
+        assert_eq!(dest.state.repos.lock().unwrap()["bob/alice-proj"].private, private);
+    }
 }
 
 #[test]

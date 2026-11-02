@@ -42,7 +42,8 @@ pub struct Account {
 pub enum DestinationKind {
     /// A folder that receives one bare mirror per repository.
     Local { path: PathBuf },
-    /// An account that receives one private repository per source repository.
+    /// An account that receives one repository per source repository, private
+    /// or public like its source.
     Remote {
         account_id: String,
         /// Organization or user to create repositories under. Empty means

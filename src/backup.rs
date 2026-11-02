@@ -181,7 +181,7 @@ fn push_to_remote(
         &target.namespace
     };
     let name = remote_name(&job.repo);
-    client.ensure_backup_repo(&target.access.login, owner, &name, source_url)?;
+    client.ensure_backup_repo(&target.access.login, owner, &name, source_url, job.repo.private)?;
     let url = client.git_url(owner, &name);
     git.push_mirror(Some(&target.access.git_auth()), mirror, &url, plan.prune)
 }

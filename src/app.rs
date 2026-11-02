@@ -1052,7 +1052,7 @@ impl App {
                 ui.add(
                     egui::Label::new(
                         RichText::new(t(
-                            "Each repository becomes a private repository named owner-name. Existing repositories are never overwritten unless they are the backup of the same source.",
+                            "Each repository becomes a repository named owner-name, private or public like its source. Existing repositories are never overwritten unless they are the backup of the same source.",
                         ))
                         .small()
                         .weak(),
