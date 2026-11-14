@@ -46,6 +46,12 @@ struct ListResult {
     result: Result<Listing, String>,
 }
 
+struct DeleteResult {
+    key: String,
+    full_name: String,
+    result: Result<(), String>,
+}
+
 struct LogLine {
     error: bool,
     text: String,
@@ -78,6 +84,7 @@ enum Dialog {
     Destination(DestinationForm),
     ConfirmDeleteAccount(String),
     ConfirmDeleteDestination(String),
+    ConfirmDeleteRepo(String),
 }
 
 /// A change requested while the UI borrows the state, applied afterwards.
@@ -86,6 +93,7 @@ enum Action {
     NewAccount,
     EditAccount(String),
     AskDeleteAccount(String),
+    AskDeleteRepo(String),
     NewDestination,
     EditDestination(String),
     AskDeleteDestination(String),
@@ -104,6 +112,8 @@ pub struct App {
     egui_ctx: egui::Context,
     list_sender: Sender<ListResult>,
     list_receiver: Receiver<ListResult>,
+    delete_sender: Sender<DeleteResult>,
+    delete_receiver: Receiver<DeleteResult>,
     backup_sender: Sender<Event>,
     backup_receiver: Receiver<Event>,
     account_states: HashMap<String, AccountState>,
@@ -130,6 +140,7 @@ impl App {
         set_language(&config.language);
         let (list_sender, list_receiver) = channel();
         let (backup_sender, backup_receiver) = channel();
+        let (delete_sender, delete_receiver) = channel();
         let mut app = Self {
             config,
             can_save,
@@ -137,6 +148,8 @@ impl App {
             egui_ctx: ctx.clone(),
             list_sender,
             list_receiver,
+            delete_sender,
+            delete_receiver,
             backup_sender,
             backup_receiver,
             account_states: HashMap::new(),
@@ -216,6 +229,52 @@ impl App {
         }
         while let Ok(event) = self.backup_receiver.try_recv() {
             self.apply_backup_event(event);
+        }
+        while let Ok(message) = self.delete_receiver.try_recv() {
+            self.apply_delete_result(message);
+        }
+    }
+
+    /// Deletes one repository on its server in the background.
+    fn delete_repo_start(&mut self, key: &str) {
+        let Some(row) = self.repos.iter().find(|row| row.key == key) else {
+            return;
+        };
+        let Some(account) = self.config.account(&row.account_id) else {
+            return;
+        };
+        let account = account.clone();
+        let repo = row.repo.clone();
+        let key = key.to_owned();
+        let token = load_token(&account.id);
+        let sender = self.delete_sender.clone();
+        let ctx = self.egui_ctx.clone();
+        std::thread::spawn(move || {
+            let result = token
+                .map_err(|error| error.to_string())
+                .and_then(|token| {
+                    Client::new(account.kind, &account.base_url, &token)
+                        .delete_repo(&repo.owner, &repo.name)
+                        .map_err(|error| error.to_string())
+                });
+            let full_name = repo.full_name();
+            let _ = sender.send(DeleteResult { key, full_name, result });
+            ctx.request_repaint();
+        });
+    }
+
+    fn apply_delete_result(&mut self, message: DeleteResult) {
+        match message.result {
+            Ok(()) => {
+                self.push_log(false, tf("Deleted {}", &[&message.full_name]));
+                self.repos.retain(|row| row.key != message.key);
+                self.config.selected.remove(&message.key);
+                self.save_config();
+            }
+            Err(error) => self.push_log(
+                true,
+                format!("{}: {error:#}", tf("Cannot delete {}", &[&message.full_name])),
+            ),
         }
     }
 
@@ -511,6 +570,7 @@ impl App {
                 Action::NewAccount => self.open_account_form(None),
                 Action::EditAccount(id) => self.open_account_form(Some(id)),
                 Action::AskDeleteAccount(id) => self.dialog = Dialog::ConfirmDeleteAccount(id),
+                Action::AskDeleteRepo(key) => self.dialog = Dialog::ConfirmDeleteRepo(key),
                 Action::NewDestination => self.open_destination_form(None),
                 Action::EditDestination(id) => self.open_destination_form(Some(id)),
                 Action::AskDeleteDestination(id) => self.dialog = Dialog::ConfirmDeleteDestination(id),
@@ -808,6 +868,7 @@ impl App {
                 .column(Column::initial(100.0).at_least(60.0).clip(true))
                 .column(Column::initial(110.0).at_least(60.0).clip(true))
                 .column(Column::remainder().at_least(90.0).clip(true))
+                .column(Column::exact(64.0).resizable(false))
                 .header(row_height, |mut header| {
                     header.col(|ui| {
                         let total = visible.len();
@@ -836,6 +897,9 @@ impl App {
                     });
                     header.col(|ui| {
                         ui.strong(t("Status"));
+                    });
+                    header.col(|ui| {
+                        ui.strong(t("Delete"));
                     });
                 })
                 .body(|body| {
@@ -875,6 +939,11 @@ impl App {
                             ui.add(egui::Label::new(name).truncate());
                         });
                         table_row.col(|ui| status_cell(ui, &row.status));
+                        table_row.col(|ui| {
+                            if ui.small_button(t("Delete")).clicked() {
+                                actions.push(Action::AskDeleteRepo(row.key.clone()));
+                            }
+                        });
                     });
                 });
         });
@@ -899,6 +968,30 @@ impl App {
                     }
                     Some(false) => Dialog::None,
                     None => Dialog::ConfirmDeleteAccount(id),
+                }
+            }
+            Dialog::ConfirmDeleteRepo(key) => {
+                let info = self.repos.iter().find(|row| row.key == key).and_then(|row| {
+                    let full_name = row.repo.full_name();
+                    let account = self.config.account(&row.account_id).map(account_label)?;
+                    Some((full_name, account))
+                });
+                match info {
+                    Some((full_name, account)) => {
+                        let message = tf(
+                            "Permanently delete the repository {} on {}? This cannot be undone.",
+                            &[&full_name, &account],
+                        );
+                        match confirm_dialog(ctx, &message) {
+                            Some(true) => {
+                                self.delete_repo_start(&key);
+                                Dialog::None
+                            }
+                            Some(false) => Dialog::None,
+                            None => Dialog::ConfirmDeleteRepo(key),
+                        }
+                    }
+                    None => Dialog::None,
                 }
             }
             Dialog::ConfirmDeleteDestination(id) => {

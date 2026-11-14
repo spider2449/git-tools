@@ -189,6 +189,16 @@ impl Client {
         self.read_response(response)
     }
 
+    fn delete(&self, path: &str) -> Result<(u16, String)> {
+        let response = self
+            .agent
+            .delete(&self.api_url(path))
+            .header("Authorization", &self.authorization())
+            .header("Accept", "application/vnd.github+json, application/json")
+            .call();
+        self.read_response(response)
+    }
+
     fn read_response(
         &self,
         response: Result<ureq::http::Response<ureq::Body>, ureq::Error>,
@@ -362,6 +372,17 @@ impl Client {
         let path = format!("/repos/{owner}/{name}");
         let (status, text) = self.patch(&path, json!({ "private": private }))?;
         if status != 200 {
+            bail!(self.status_error(status, &text));
+        }
+        Ok(())
+    }
+
+    /// Permanently deletes `owner/name` on the server. GitHub needs the
+    /// `delete_repo` token permission; Gitea needs write access and a server
+    /// that allows deleting repositories.
+    pub fn delete_repo(&self, owner: &str, name: &str) -> Result<()> {
+        let (status, text) = self.delete(&format!("/repos/{owner}/{name}"))?;
+        if status != 204 {
             bail!(self.status_error(status, &text));
         }
         Ok(())
@@ -610,5 +631,28 @@ mod tests {
         let (base, _log) = serve_existing_backup(true, 422);
         let client = Client::new(ProviderKind::Gitea, &base, "t");
         assert!(client.ensure_backup_repo("m", "m", "n", "https://src/a/b.git", false).is_ok());
+    }
+
+    #[test]
+    fn delete_repo_sends_a_delete_request() {
+        let (base, log) = serve(|method, _| match method {
+            "DELETE" => (204, String::new()),
+            _ => (404, "{}".to_owned()),
+        });
+        Client::new(ProviderKind::Gitea, &base, "t").delete_repo("me", "a").unwrap();
+        let log = log.lock().unwrap();
+        assert_eq!(log.len(), 1);
+        assert!(log[0].starts_with("DELETE /api/v1/repos/me/a"));
+        assert!(log[0].contains("[token t]"));
+    }
+
+    #[test]
+    fn delete_repo_reports_errors() {
+        let (base, _log) = serve(|method, _| match method {
+            "DELETE" => (403, r#"{"message":"forbidden"}"#.to_owned()),
+            _ => (404, "{}".to_owned()),
+        });
+        let error = Client::new(ProviderKind::Gitea, &base, "t").delete_repo("me", "a").err().unwrap();
+        assert!(error.to_string().contains("forbidden"));
     }
 }
