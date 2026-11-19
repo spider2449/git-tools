@@ -78,6 +78,7 @@ pub struct SortOrder {
 #[serde(default)]
 pub struct Config {
     pub language: String,
+    pub theme: egui::ThemePreference,
     pub accounts: Vec<Account>,
     pub destinations: Vec<Destination>,
     pub selected: BTreeSet<String>,
@@ -92,6 +93,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             language: "zh-TW".to_owned(),
+            theme: egui::ThemePreference::System,
             accounts: Vec::new(),
             destinations: Vec::new(),
             selected: BTreeSet::new(),
@@ -217,6 +219,19 @@ pub fn is_safe_segment(name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn theme_defaults_for_older_settings_and_round_trips() {
+        use egui::ThemePreference::{Dark, Light, System};
+
+        let mut config: Config = serde_json::from_str(r#"{"language":"en"}"#).unwrap();
+        assert_eq!(config.theme, System);
+        for theme in [Light, Dark, System] {
+            config.theme = theme;
+            let saved = serde_json::to_string(&config).unwrap();
+            assert_eq!(serde_json::from_str::<Config>(&saved).unwrap().theme, theme);
+        }
+    }
 
     #[test]
     fn base_url_is_normalized() {

@@ -1,4 +1,4 @@
-# Git Backup
+# <img src="assets/logo.svg" width="36" height="36" align="absmiddle" alt=""> Git Backup
 
 A desktop tool that backs up repositories from GitHub and Gitea accounts to
 one or more destinations. Requires Git on `PATH`.
@@ -10,6 +10,8 @@ one or more destinations. Requires Git on `PATH`.
 3. Tick repositories, or use Select all, then start the backup.
 
 Run again at any time to update existing backups.
+
+Use the Theme menu in the top bar to follow the system appearance or choose Light or Dark. Your selection is saved automatically.
 
 ## Access tokens
 

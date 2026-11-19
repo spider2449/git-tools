@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Local, Utc};
 use eframe::egui;
-use egui::{Color32, RichText};
+use egui::RichText;
 use egui_extras::{Column, TableBuilder};
 
 use crate::backup::{self, Event, Plan, RemoteTarget, RepoJob, RepoStatus, ServerAccess};
@@ -20,12 +20,10 @@ use crate::config::{
     is_safe_segment, load_token, new_id, normalize_base_url, store_token,
 };
 use crate::i18n::{set_language, t, tf};
+use crate::icons::Icon;
 use crate::provider::{Client, Listing, Repo};
 
 const MAX_LOG_LINES: usize = 5000;
-const GREEN: Color32 = Color32::from_rgb(70, 170, 90);
-const AMBER: Color32 = Color32::from_rgb(215, 150, 40);
-const RED: Color32 = Color32::from_rgb(220, 80, 70);
 
 struct RepoRow {
     key: String,
@@ -138,6 +136,7 @@ impl App {
             ),
         };
         set_language(&config.language);
+        crate::theme::install(ctx, config.theme);
         let (list_sender, list_receiver) = channel();
         let (backup_sender, backup_receiver) = channel();
         let (delete_sender, delete_receiver) = channel();
@@ -592,6 +591,8 @@ impl App {
 
     fn top_bar(&mut self, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
         ui.horizontal(|ui| {
+            let logo = egui::Image::new(egui::include_image!("../assets/logo.svg"));
+            ui.add(logo.fit_to_exact_size(egui::Vec2::splat(30.0)));
             ui.heading("Git Backup");
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let before = self.config.language.clone();
@@ -605,10 +606,23 @@ impl App {
                     set_language(&self.config.language);
                     actions.push(Action::SaveConfig);
                 }
+                let previous = self.config.theme;
+                egui::ComboBox::from_label(t("Theme"))
+                    .selected_text(crate::theme::label(previous))
+                    .show_ui(ui, |ui| {
+                        use egui::ThemePreference::{Dark, Light, System};
+                        for theme in [System, Light, Dark] {
+                            ui.selectable_value(&mut self.config.theme, theme, crate::theme::label(theme));
+                        }
+                    });
+                if self.config.theme != previous {
+                    ui.ctx().set_theme(self.config.theme);
+                    actions.push(Action::SaveConfig);
+                }
             });
         });
         if let Some(banner) = &self.banner {
-            ui.colored_label(RED, banner);
+            ui.colored_label(ui.visuals().error_fg_color, banner);
         }
     }
 
@@ -617,7 +631,7 @@ impl App {
             ui.horizontal(|ui| {
                 ui.strong(t("Accounts"));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.small_button(t("Add")).clicked() {
+                    if ui.add(Icon::Add.button(t("Add")).small()).clicked() {
                         actions.push(Action::NewAccount);
                     }
                 });
@@ -639,10 +653,10 @@ impl App {
                         ui.label(RichText::new(account.kind.label()).small().strong());
                         ui.label(&account.name);
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if ui.small_button(t("Delete")).clicked() {
+                            if ui.add(Icon::Delete.button(t("Delete")).small()).clicked() {
                                 actions.push(Action::AskDeleteAccount(account.id.clone()));
                             }
-                            if ui.small_button(t("Edit")).clicked() {
+                            if ui.add(Icon::Edit.button(t("Edit")).small()).clicked() {
                                 actions.push(Action::EditAccount(account.id.clone()));
                             }
                         });
@@ -653,7 +667,7 @@ impl App {
                             ui.weak(t("Loading..."));
                         }
                         Some(AccountState { error: Some(error), .. }) => {
-                            ui.colored_label(RED, error);
+                            ui.colored_label(ui.visuals().error_fg_color, error);
                         }
                         Some(AccountState { login: Some(login), .. }) => {
                             let count = self.repos.iter().filter(|r| r.account_id == account.id).count();
@@ -671,14 +685,14 @@ impl App {
             ui.horizontal(|ui| {
                 ui.strong(t("Destinations"));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.small_button(t("Add")).clicked() {
+                    if ui.add(Icon::Add.button(t("Add")).small()).clicked() {
                         actions.push(Action::NewDestination);
                     }
-                    if ui.small_button(t("None")).clicked() {
+                    if ui.add(Icon::Deselect.button(t("None")).small()).clicked() {
                         self.config.destinations.iter_mut().for_each(|d| d.enabled = false);
                         actions.push(Action::SaveConfig);
                     }
-                    if ui.small_button(t("All")).clicked() {
+                    if ui.add(Icon::Select.button(t("All")).small()).clicked() {
                         self.config.destinations.iter_mut().for_each(|d| d.enabled = true);
                         actions.push(Action::SaveConfig);
                     }
@@ -701,10 +715,10 @@ impl App {
                             actions.push(Action::SaveConfig);
                         }
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if ui.small_button(t("Delete")).clicked() {
+                            if ui.add(Icon::Delete.button(t("Delete")).small()).clicked() {
                                 actions.push(Action::AskDeleteDestination(destination.id.clone()));
                             }
-                            if ui.small_button(t("Edit")).clicked() {
+                            if ui.add(Icon::Edit.button(t("Edit")).small()).clicked() {
                                 actions.push(Action::EditDestination(destination.id.clone()));
                             }
                             ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
@@ -724,13 +738,13 @@ impl App {
         ui.add_space(4.0);
         ui.horizontal(|ui| {
             if running {
-                if ui.button(t("Cancel")).clicked() {
+                if ui.add(Icon::Cancel.button(t("Cancel"))).clicked() {
                     actions.push(Action::Cancel);
                 }
             } else {
                 let can_start = selected > 0 && enabled_destinations > 0;
                 let label = RichText::new(tf("Back up {} repositories", &[&selected.to_string()])).strong();
-                let mut response = ui.add_enabled(can_start, egui::Button::new(label));
+                let mut response = ui.add_enabled(can_start, Icon::Backup.button(label));
                 if selected == 0 {
                     response = response.on_disabled_hover_text(t("Select at least one repository"));
                 } else if enabled_destinations == 0 {
@@ -766,7 +780,7 @@ impl App {
         ui.separator();
         ui.horizontal(|ui| {
             ui.strong(t("Log"));
-            if ui.small_button(t("Clear")).clicked() {
+            if ui.add(Icon::Clear.button(t("Clear")).small()).clicked() {
                 self.log.clear();
             }
         });
@@ -776,7 +790,7 @@ impl App {
             .show(ui, |ui| {
                 for line in &self.log {
                     let text = RichText::new(&line.text).small();
-                    let text = if line.error { text.color(RED) } else { text };
+                    let text = if line.error { text.color(ui.visuals().error_fg_color) } else { text };
                     ui.add(egui::Label::new(text).wrap());
                 }
             });
@@ -801,10 +815,10 @@ impl App {
             .count();
         let loading = self.is_loading();
 
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             ui.strong(t("Repositories"));
             ui.add_enabled_ui(!loading, |ui| {
-                if ui.button(t("Refresh")).clicked() {
+                if ui.add(Icon::Refresh.button(t("Refresh"))).clicked() {
                     actions.push(Action::Refresh);
                 }
             });
@@ -817,13 +831,13 @@ impl App {
                     .desired_width(180.0),
             );
             let hint = t("Applies to the repositories currently shown");
-            if ui.button(t("Select all")).on_hover_text(hint).clicked() {
+            if ui.add(Icon::Select.button(t("Select all"))).on_hover_text(hint).clicked() {
                 for &index in &visible {
                     self.config.selected.insert(self.repos[index].key.clone());
                 }
                 actions.push(Action::SaveConfig);
             }
-            if ui.button(t("Select none")).on_hover_text(hint).clicked() {
+            if ui.add(Icon::Deselect.button(t("Select none"))).on_hover_text(hint).clicked() {
                 for &index in &visible {
                     self.config.selected.remove(&self.repos[index].key);
                 }
@@ -940,7 +954,7 @@ impl App {
                         });
                         table_row.col(|ui| status_cell(ui, &row.status));
                         table_row.col(|ui| {
-                            if ui.small_button(t("Delete")).clicked() {
+                            if ui.add(Icon::Delete.button(t("Delete")).small()).clicked() {
                                 actions.push(Action::AskDeleteRepo(row.key.clone()));
                             }
                         });
@@ -1087,17 +1101,17 @@ impl App {
             );
             ui.small(t("The token is kept in the system's credential store, not in the settings file."));
             if form.base_url.trim().starts_with("http://") {
-                ui.colored_label(AMBER, t("Plain http sends the token unencrypted over the network."));
+                ui.colored_label(ui.visuals().warn_fg_color, t("Plain http sends the token unencrypted over the network."));
             }
             if let Some(error) = &form.error {
-                ui.colored_label(RED, error);
+                ui.colored_label(ui.visuals().error_fg_color, error);
             }
             ui.add_space(8.0);
             ui.horizontal(|ui| {
-                if ui.button(t("Save")).clicked() {
+                if ui.add(Icon::Save.button(t("Save"))).clicked() {
                     outcome = Some(true);
                 }
-                if ui.button(t("Cancel")).clicked() {
+                if ui.add(Icon::Cancel.button(t("Cancel"))).clicked() {
                     outcome = Some(false);
                 }
             });
@@ -1132,7 +1146,7 @@ impl App {
             ui.add_space(6.0);
             if form.is_remote {
                 if accounts.is_empty() {
-                    ui.colored_label(AMBER, t("Please add the account first."));
+                    ui.colored_label(ui.visuals().warn_fg_color, t("Please add the account first."));
                 }
                 egui::Grid::new("destination_form").num_columns(2).spacing([10.0, 8.0]).show(ui, |ui| {
                     ui.label(t("Account"));
@@ -1175,7 +1189,7 @@ impl App {
             } else {
                 ui.horizontal(|ui| {
                     ui.add(egui::TextEdit::singleline(&mut form.path).desired_width(370.0));
-                    if ui.button(t("Browse...")).clicked()
+                    if ui.add(Icon::Folder.button(t("Browse..."))).clicked()
                         && let Some(folder) = rfd::FileDialog::new().pick_folder()
                     {
                         form.path = folder.display().to_string();
@@ -1194,14 +1208,14 @@ impl App {
                 );
             }
             if let Some(error) = &form.error {
-                ui.colored_label(RED, error);
+                ui.colored_label(ui.visuals().error_fg_color, error);
             }
             ui.add_space(8.0);
             ui.horizontal(|ui| {
-                if ui.button(t("Save")).clicked() {
+                if ui.add(Icon::Save.button(t("Save"))).clicked() {
                     outcome = Some(true);
                 }
-                if ui.button(t("Cancel")).clicked() {
+                if ui.add(Icon::Cancel.button(t("Cancel"))).clicked() {
                     outcome = Some(false);
                 }
             });
@@ -1263,13 +1277,14 @@ fn sort_header(
     sort: SortOrder,
     actions: &mut Vec<Action>,
 ) {
-    let arrow = match (sort.column == column, sort.descending) {
-        (false, _) => "",
-        (true, false) => " \u{2b06}",
-        (true, true) => " \u{2b07}",
+    let text = RichText::new(label).strong();
+    let header = if sort.column == column {
+        let icon = if sort.descending { Icon::Down } else { Icon::Up };
+        icon.button(text)
+    } else {
+        egui::Button::new(text)
     };
-    let text = RichText::new(format!("{label}{arrow}")).strong();
-    let button = ui.add(egui::Button::new(text).frame(false));
+    let button = ui.add(header.frame(false));
     if button.on_hover_text(t("Click to sort")).clicked() {
         actions.push(Action::SortBy(column));
     }
@@ -1317,13 +1332,13 @@ fn status_cell(ui: &mut egui::Ui, status: &RepoStatus) {
             ui.label(t("Running"));
         }
         RepoStatus::Done => {
-            ui.colored_label(GREEN, t("Done"));
+            ui.colored_label(crate::theme::success_color(ui.visuals()), t("Done"));
         }
         RepoStatus::Partial(detail) => {
-            ui.colored_label(AMBER, t("Partly failed")).on_hover_text(detail);
+            ui.colored_label(ui.visuals().warn_fg_color, t("Partly failed")).on_hover_text(detail);
         }
         RepoStatus::Failed(detail) => {
-            ui.colored_label(RED, t("Failed")).on_hover_text(detail);
+            ui.colored_label(ui.visuals().error_fg_color, t("Failed")).on_hover_text(detail);
         }
         RepoStatus::Cancelled => {
             ui.weak(t("Cancelled"));
@@ -1339,10 +1354,10 @@ fn confirm_dialog(ctx: &egui::Context, message: &str) -> Option<bool> {
         ui.add(egui::Label::new(message).wrap());
         ui.add_space(10.0);
         ui.horizontal(|ui| {
-            if ui.button(t("Delete")).clicked() {
+            if ui.add(Icon::Delete.button(t("Delete"))).clicked() {
                 answer = Some(true);
             }
-            if ui.button(t("Cancel")).clicked() {
+            if ui.add(Icon::Cancel.button(t("Cancel"))).clicked() {
                 answer = Some(false);
             }
         });

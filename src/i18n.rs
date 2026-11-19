@@ -61,6 +61,7 @@ mod tests {
     fn all_keys_are_translated() {
         let sources = [
             include_str!("app.rs"),
+            include_str!("theme.rs"),
             include_str!("backup.rs"),
             include_str!("config.rs"),
             include_str!("provider.rs"),

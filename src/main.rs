@@ -6,7 +6,9 @@ mod backup;
 mod config;
 mod git;
 mod i18n;
+mod icons;
 mod provider;
+mod theme;
 
 #[cfg(test)]
 mod e2e_tests;
@@ -44,9 +46,12 @@ fn install_cjk_font(ctx: &egui::Context) {
 }
 
 fn main() -> eframe::Result {
+    let icon = eframe::icon_data::from_png_bytes(include_bytes!("../assets/app-icon.png"))
+        .expect("embedded Git Backup icon");
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("Git Backup")
+            .with_icon(icon)
             .with_inner_size([1180.0, 760.0])
             .with_min_inner_size([820.0, 520.0]),
         ..Default::default()
@@ -55,6 +60,7 @@ fn main() -> eframe::Result {
         "git-backup",
         options,
         Box::new(|creation| {
+            egui_extras::install_image_loaders(&creation.egui_ctx);
             install_cjk_font(&creation.egui_ctx);
             Ok(Box::new(app::App::new(&creation.egui_ctx)))
         }),
