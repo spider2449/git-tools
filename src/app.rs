@@ -99,6 +99,7 @@ enum Action {
     SortBy(SortColumn),
     Start,
     Cancel,
+    ExportList,
 }
 
 pub struct App {
@@ -431,6 +432,26 @@ impl App {
         }));
     }
 
+    /// Saves the checked sources and destinations as a plain-text list.
+    fn export_list(&mut self) {
+        let text = export_text(&self.config, &self.repos);
+        let name = format!("git-backup-{}.txt", Local::now().format("%Y%m%d-%H%M"));
+        let Some(path) = rfd::FileDialog::new()
+            .set_file_name(&name)
+            .add_filter(t("Text file"), &["txt"])
+            .save_file()
+        else {
+            return;
+        };
+        match std::fs::write(&path, text) {
+            Ok(()) => {
+                let path = path.display().to_string();
+                self.push_log(false, tf("Exported the list to {}", &[&path]));
+            }
+            Err(error) => self.push_log(true, format!("{}: {error}", t("Cannot write the list"))),
+        }
+    }
+
     fn open_account_form(&mut self, id: Option<String>) {
         let existing = id.as_deref().and_then(|id| self.config.account(id));
         let form = match existing {
@@ -580,6 +601,7 @@ impl App {
                     self.save_config();
                 }
                 Action::Start => self.start_backup(),
+                Action::ExportList => self.export_list(),
                 Action::Cancel => {
                     if let Some(cancel) = &self.run_cancel {
                         cancel.store(true, Ordering::Relaxed);
@@ -753,6 +775,17 @@ impl App {
                 if response.clicked() {
                     actions.push(Action::Start);
                 }
+            }
+
+            let can_export = selected > 0 || enabled_destinations > 0;
+            let mut export = ui
+                .add_enabled(can_export, Icon::Export.button(t("Export list")))
+                .on_hover_text(t("Save the checked sources and destinations as a text file"));
+            if !can_export {
+                export = export.on_disabled_hover_text(t("Select at least one repository or destination"));
+            }
+            if export.clicked() {
+                actions.push(Action::ExportList);
             }
 
             ui.add_enabled_ui(!running, |ui| {
@@ -1252,6 +1285,58 @@ fn destination_label(config: &Config, destination: &Destination) -> String {
     }
 }
 
+/// One line for a destination in the exported list.
+fn destination_export_text(config: &Config, destination: &Destination) -> String {
+    match &destination.kind {
+        DestinationKind::Local { path } => format!("{}: {}", t("Local folder"), path.display()),
+        DestinationKind::Remote { .. } => destination_label(config, destination),
+    }
+}
+
+/// Builds the plain-text list of checked sources and destinations.
+fn export_text(config: &Config, repos: &[RepoRow]) -> String {
+    let mut out = format!(
+        "Git Backup - {}\n{}\n\n",
+        t("Backup list"),
+        Local::now().format("%Y-%m-%d %H:%M")
+    );
+
+    let checked: Vec<&RepoRow> = repos
+        .iter()
+        .filter(|row| config.selected.contains(&row.key))
+        .collect();
+    out.push_str(&format!("{} ({})\n", t("Sources"), checked.len()));
+    for account in &config.accounts {
+        let rows: Vec<&RepoRow> = checked
+            .iter()
+            .copied()
+            .filter(|row| row.account_id == account.id)
+            .collect();
+        if rows.is_empty() {
+            continue;
+        }
+        out.push_str(&format!("[{}] {}\n", account.kind.label(), account.name));
+        let base_url = account.base_url.trim_end_matches('/');
+        for row in rows {
+            let full_name = row.repo.full_name();
+            out.push_str(&format!("  {full_name}  {base_url}/{full_name}\n"));
+        }
+    }
+    if checked.is_empty() {
+        out.push_str(&format!("  {}\n", t("None selected")));
+    }
+
+    let enabled: Vec<&Destination> = config.destinations.iter().filter(|d| d.enabled).collect();
+    out.push_str(&format!("\n{} ({})\n", t("Destinations"), enabled.len()));
+    for destination in enabled {
+        out.push_str(&format!("  {}\n", destination_export_text(config, destination)));
+    }
+    if config.destinations.iter().all(|d| !d.enabled) {
+        out.push_str(&format!("  {}\n", t("None selected")));
+    }
+    out
+}
+
 fn repo_type_text(repo: &Repo) -> String {
     let mut parts = vec![if repo.private { t("Private") } else { t("Public") }];
     if repo.fork {
@@ -1460,5 +1545,39 @@ mod tests {
         let oldest = next_sort(newest, SortColumn::Modified);
         assert_eq!(oldest, SortOrder { column: SortColumn::Modified, descending: false });
         assert_eq!(next_sort(oldest, SortColumn::Name), name);
+    }
+
+    #[test]
+    fn export_lists_only_checked_sources_and_destinations() {
+        let mut config = Config::default();
+        config.accounts.push(Account {
+            id: "a".to_owned(),
+            kind: ProviderKind::GitHub,
+            name: "Me".to_owned(),
+            base_url: "https://github.com".to_owned(),
+            use_as_source: true,
+        });
+        config.destinations.push(Destination {
+            id: "on".to_owned(),
+            enabled: true,
+            kind: DestinationKind::Local { path: PathBuf::from("D:/backup") },
+        });
+        config.destinations.push(Destination {
+            id: "off".to_owned(),
+            enabled: false,
+            kind: DestinationKind::Local { path: PathBuf::from("D:/old") },
+        });
+
+        let mut keep = row("keep", None);
+        keep.key = "a/me/keep".to_owned();
+        let skip = row("skip", None);
+        config.selected.insert(keep.key.clone());
+
+        let text = export_text(&config, &[keep, skip]);
+        assert!(text.contains("me/keep"), "{text}");
+        assert!(text.contains("https://github.com/me/keep"), "{text}");
+        assert!(!text.contains("me/skip"), "{text}");
+        assert!(text.contains("D:/backup"), "{text}");
+        assert!(!text.contains("D:/old"), "{text}");
     }
 }

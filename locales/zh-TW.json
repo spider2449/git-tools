@@ -107,5 +107,14 @@
   "{} is a mirror of another repository: {}": "{} 是另一個專案的鏡像：{}",
   "Permanently delete the repository {} on {}? This cannot be undone.": "要永久刪除 {} 上的專案 {} 嗎？此操作無法復原。",
   "Deleted {}": "已刪除 {}",
-  "Cannot delete {}": "無法刪除 {}"
+  "Cannot delete {}": "無法刪除 {}",
+  "Export list": "匯出清單",
+  "Save the checked sources and destinations as a text file": "將勾選的來源和目的地儲存為文字檔",
+  "Select at least one repository or destination": "請至少勾選一個專案或目的地",
+  "Backup list": "備份清單",
+  "Sources": "來源",
+  "None selected": "未勾選",
+  "Text file": "文字檔",
+  "Exported the list to {}": "已將清單匯出至 {}",
+  "Cannot write the list": "無法寫入清單"
 }

@@ -9,6 +9,9 @@ one or more destinations. Requires Git on `PATH`.
 2. Add one or more destinations and tick the ones to use.
 3. Tick repositories, or use Select all, then start the backup.
 
+Use Export list to save the ticked sources and destinations as a plain-text
+file.
+
 Run again at any time to update existing backups.
 
 Use the Theme menu in the top bar to follow the system appearance or choose Light or Dark. Your selection is saved automatically.
